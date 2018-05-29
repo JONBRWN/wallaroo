@@ -62,20 +62,28 @@ def external_sender_query(host, port, query_type):
     return stdout
 
 
-def partitions_query(host, port):
+def partitions_query(addresses):
     """
-    Query the worker at the given address for its partition routing
-    information.
+    Query the workers at the given addresses for their partitions.
+    Returns a dictionary of {address: {'stdout': raw_response,
+                                       'data': parsed response}}
     """
-    stdout = external_sender_query(host, port, 'partition-query')
-    try:
-        return json.loads(stdout)
-    except Exception as err:
-        e = ObservabilityResponseError("Failed to deserialize observability"
-                                      " response:\n{!r}".format(stdout))
-        logging.error(e)
-        raise
-
+    responses = {}
+    # collect responses
+    for host, port in addresses:
+        responses.get((host,port), {})['stdout'] = (
+            external_sender_query(host, port, 'partition-query'))
+    # try to parse responses
+    for key, stdout in responses.items():
+        try:
+            responses[key]['data'] = json.loads(stdout)
+        except Exception as err:
+            e = ObservabilityResponseError(
+                "Failed to deserialize observability response from {}:\n{!r}"
+                .format(stdout))
+            logging.error(e)
+            raise
+    return responses
 
 
 def cluster_status_query(host, port):
@@ -145,10 +153,12 @@ class ObservabilityNotifier(StoppableThread):
     """
     __base_name__ = 'ObservabilityNotifier'
 
-    def __init__(self, query_func, tests, timeout=30, period=2):
+    def __init__(self, query_func, query_args, tests, timeout=30, period=2):
         """
         - `query_func` is an argument-free function to query an observability
         statys. You can use `functools.partial` to create it.
+        - `query_args` is a list of arguments to pass the query function.
+          Pass an empty list if no arguments are required.
         - `tests` is either a single function or a list of functions, each of
         which will be executed on a copy of the result set. A test should fail
         by raising an error, and pass by returning True.
@@ -168,6 +178,7 @@ class ObservabilityNotifier(StoppableThread):
             self.tests = [tests]
         self.tests = [(t, get_func_name(t)) for t in self.tests]
         self.query_func = query_func
+        self.query_query_args = query_args
         self.query_func_name = get_func_name(query_func)
         self.period = period
 
@@ -175,7 +186,7 @@ class ObservabilityNotifier(StoppableThread):
         started = time.time()
         while not self.stopped():
             try:
-                query_result = self.query_func()
+                query_result = self.query_func(*self.query_args)
             except Exception as err:
                 # sleep and retry but only if timeout hasn't elapsed
                 if (time.time() - started) <= self.timeout:

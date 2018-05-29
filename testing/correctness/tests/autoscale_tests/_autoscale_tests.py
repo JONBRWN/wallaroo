@@ -25,7 +25,6 @@ from integration import (add_runner,
                          Metrics,
                          MetricsData,
                          ObservabilityNotifier,
-                         partition_counts_query,
                          partitions_query,
                          state_entity_query,
                          PipelineTestError,
@@ -210,6 +209,15 @@ def get_crashed_runners(runners):
     return filter(lambda r: r.poll(), runners)
 
 
+def joined_partition_query_data(responses):
+    """
+    Join partition query responses from multiple workers into a single
+    partition map.
+    Raise error on duplicate partitions.
+    """
+    partitions = {}
+
+
 def test_crashed_workers(runners):
     """
     Test if there are any crashed workers and raise an error if yes
@@ -235,11 +243,13 @@ def test_all_workers_have_partitions(partitions):
     assert(map(len, partitions['state_partitions']['letter-state']
                     .values()).count(0) == 0)
 
+
 def test_worker_has_state_entities(state_entities):
     """
     Test that the worker has state_entities
     """
     assert(len(state_entities['letter-state']) > 0)
+
 
 def test_cluster_is_processing(status):
     """
@@ -371,35 +381,27 @@ def _autoscale_sequence(command, ops=[], cycles=1, initial=None):
             metrics_host, metrics_port = metrics.get_connection_info()
             time.sleep(0.05)
 
-            num_ports = sources + 3 + (3 * (workers - 1))
+            num_ports = sources + 3 * workers
             ports = get_port_values(num=num_ports, host=host)
-            (input_ports, (control_port, data_port, external_port),
-             worker_ports) = (ports[:sources],
-                              ports[sources:sources+3],
-                              zip(ports[-(3*(workers-1)):][::3],
-                                  ports[-(3*(workers-1)):][1::3],
-                                  ports[-(3*(workers-1)):][2::3]))
+            (input_ports, worker_ports) = (
+                ports[:sources],
+                [ports[sources:][i:i+3] for i in xrange(0,
+                    len(ports[sources:]), 3)])
             inputs = ','.join(['{}:{}'.format(host, p) for p in
                                input_ports])
 
-            # Prepare query functions with host and port pre-defined
-            query_func_partitions = partial(partitions_query, host,
-                                            external_port)
-            query_func_partition_counts = partial(partition_counts_query,
-                                                  host, external_port)
-            query_func_cluster_status = partial(cluster_status_query, host,
-                                                external_port)
+            # Prepare query functions to run against initializer
             query_func_state_entity = partial(state_entity_query, host,
                                               external_port)
 
             # Start the initial runners
             start_runners(runners, command, host, inputs, outputs,
-                          metrics_port, control_port, external_port, data_port,
-                          res_dir, workers, worker_ports)
+                          metrics_port, res_dir, workers, worker_ports)
 
             # Verify cluster is processing messages
-            obs = ObservabilityNotifier(query_func_cluster_status,
-                test_cluster_is_processing)
+            obs = ObservabilityNotifier(cluster_status_query,
+                (host, worker_ports[0][2]),
+                tests=test_cluster_is_processing)
             obs.start()
             obs.join()
             if obs.error:
@@ -408,15 +410,17 @@ def _autoscale_sequence(command, ops=[], cycles=1, initial=None):
             # Verify that `workers` workers are active
             # Create a partial function
             partial_test_worker_count = partial(test_worker_count, workers)
-            obs = ObservabilityNotifier(query_func_cluster_status,
-                partial_test_worker_count)
+            obs = ObservabilityNotifier(cluster_status_query,
+                (host, worker_ports[0][2]),
+                tests=partial_test_worker_count)
             obs.start()
             obs.join()
             if obs.error:
                 raise obs.error
 
             # Verify all workers start with partitions
-            obs = ObservabilityNotifier(query_func_state_entity,
+            obs = ObservabilityNotifier(state_entity_query,
+                (host, worker_ports[0][2]),
                 test_worker_has_state_entities)
             obs.start()
             obs.join()
@@ -434,8 +438,9 @@ def _autoscale_sequence(command, ops=[], cycles=1, initial=None):
             for cyc in range(cycles):
                 for joiners in ops:
                     # Verify cluster is processing before proceeding
-                    obs = ObservabilityNotifier(query_func_cluster_status,
-                        test_cluster_is_processing, timeout=30)
+                    obs = ObservabilityNotifier(cluster_status_query,
+                        (host, worker_ports[0][2]),
+                        tests=test_cluster_is_processing, timeout=30)
                     obs.start()
                     obs.join()
                     if obs.error:
@@ -453,18 +458,19 @@ def _autoscale_sequence(command, ops=[], cycles=1, initial=None):
                         # create a new worker and have it join
                         new_ports = get_port_values(num=(joiners * 3), host=host,
                                                     base_port=25000)
-                        joiner_ports = zip(new_ports[::3], new_ports[1::3],
-                                           new_ports[2::3])
+                        joiner_ports = [new_ports[i:i+3] for i in
+                                        xrange(0, len(new_ports), 3)]
                         for i in range(joiners):
                             add_runner(runners, command, host, inputs, outputs,
                                        metrics_port,
-                                       control_port, external_port, data_port, res_dir,
+                                       worker_ports[0][0], res_dir,
                                        joiners, *joiner_ports[i])
                             joined.append(runners[-1])
 
                         # Verify cluster has resumed processing
-                        obs = ObservabilityNotifier(query_func_cluster_status,
-                            test_cluster_is_processing, timeout=120)
+                        obs = ObservabilityNotifier(cluster_status_query,
+                            (host, worker_ports[0][2]),
+                            tests=test_cluster_is_processing, timeout=120)
                         obs.start()
                         obs.join()
                         if obs.error:

@@ -52,6 +52,8 @@ from struct import calcsize, pack, unpack
 import tempfile
 import time
 
+from pytest_pause import pause_for_user
+
 
 class AutoscaleTestError(Exception):
     def __init__(self, args, as_error=None, as_steps=[]):

@@ -1017,7 +1017,7 @@ def start_runners(runners, command, host, inputs, outputs, metrics_port,
         alt_block=alt_block if alt_func(x) else '',
         spike_block=spike_block)
     runners.append(Runner(cmd_string=cmd, name='initializer',
-                          external=worker_ports[0][2]))
+                          external=(host, worker_ports[0][2])))
     for x in range(1, workers):
         if x in spikes:
             logging.info("Enabling spike for worker{}".format(x))
@@ -1041,7 +1041,7 @@ def start_runners(runners, command, host, inputs, outputs, metrics_port,
                               spike_block=spike_block)
         runners.append(Runner(cmd_string=cmd,
                               name='worker{}'.format(x),
-                              external=worker_ports[x][2]))
+                              external=(host, worker_ports[x][2])))
 
     # start the workers, 50ms apart
     for idx, r in enumerate(runners):
@@ -1110,7 +1110,7 @@ def add_runner(runners, command, host, inputs, outputs, metrics_port,
                           spike_block=spike_block)
     runner = Runner(cmd_string=cmd,
                     name='worker{}'.format(x),
-                    external=my_external_port)
+                    external=(host, my_external_port))
     runners.append(runner)
 
     # start the new worker

@@ -24,6 +24,7 @@ from integration import (add_runner,
                          iter_generator,
                          Metrics,
                          MetricsData,
+                         multi_states_query,
                          ObservabilityNotifier,
                          partitions_query,
                          state_entity_query,
@@ -63,6 +64,10 @@ class AutoscaleTestError(Exception):
 
 
 class AutoscaleTimeoutError(AutoscaleTestError):
+    pass
+
+
+class DuplicateKeyError(AutoscaleTestError):
     pass
 
 
@@ -217,7 +222,20 @@ def joined_partition_query_data(responses):
     partition map.
     Raise error on duplicate partitions.
     """
-    partitions = {}
+    steps = {}
+    for worker in responses.keys():
+        for step in responses[worker].keys():
+            if step not in steps:
+                steps[step] = {}
+            for part in responses[worker][step]:
+                if part in steps[step]:
+                    dup0 = worker
+                    dup1 = steps[step][part]
+                    raise DuplicateKeyError("Found duplicate keys! Step: {}, "
+                                            "Key: {}, Loc1: {}, Loc2: {}"
+                                            .format(step, part, dup0, dup1))
+                steps[step][part] = worker
+    return steps
 
 
 def test_crashed_workers(runners):
@@ -392,10 +410,6 @@ def _autoscale_sequence(command, ops=[], cycles=1, initial=None):
             inputs = ','.join(['{}:{}'.format(host, p) for p in
                                input_ports])
 
-            # Prepare query functions to run against initializer
-            query_func_state_entity = partial(state_entity_query, host,
-                                              external_port)
-
             # Start the initial runners
             start_runners(runners, command, host, inputs, outputs,
                           metrics_port, res_dir, workers, worker_ports)
@@ -452,7 +466,10 @@ def _autoscale_sequence(command, ops=[], cycles=1, initial=None):
                     test_crashed_workers(runners)
 
                     # get partition data before autoscale operation begins
-                    pre_partitions = query_func_partitions()
+                    addresses = [(r.name, r.external) for r in runners
+                                 if r.is_alive()]
+                    responses = multi_states_query(addresses)
+                    pre_partitions = joined_partition_query_data(responses)
                     steps.append(joiners)
                     joined = []
                     left = []
@@ -487,6 +504,12 @@ def _autoscale_sequence(command, ops=[], cycles=1, initial=None):
                         # data baked in
                         tmp = partial(test_migrated_partitions, pre_partitions, diff_names)
                         # Start the test notifier
+
+                        # TODO:  NISAN CONTINUE FROM HERE!
+                        # 1. replace query with "multi_states_query" as above in :471
+                        # 2. replace verification with:
+                        #      - "at least some states moved",
+                        #      - "no states from pre are missing from post" (can still have new)
                         obs = ObservabilityNotifier(query_func_partitions,
                             [test_all_workers_have_partitions,
                              tmp])

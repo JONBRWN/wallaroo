@@ -62,7 +62,22 @@ def external_sender_query(host, port, query_type):
     return stdout
 
 
-def partitions_query(addresses):
+def partitions_query(host, port):
+    """
+    Query the worker at the given address for its partition routing
+    information.
+     """
+    stdout = external_sender_query(host, port, 'partition-query')
+    try:
+        return json.loads(stdout)
+    except Exception as err:
+        e = ObservabilityResponseError("Failed to deserialize observability"
+                                      " response:\n{!r}".format(stdout))
+        logging.error(e)
+        raise
+
+
+def multi_states_query(addresses):
     """
     Query the workers at the given addresses for their partitions.
     Returns a dictionary of {address: {'stdout': raw_response,
@@ -70,17 +85,15 @@ def partitions_query(addresses):
     """
     responses = {}
     # collect responses
-    for host, port in addresses:
-        responses.get((host,port), {})['stdout'] = (
-            external_sender_query(host, port, 'partition-query'))
-    # try to parse responses
-    for key, stdout in responses.items():
+    for name, (host, port) in addresses:
         try:
-            responses[key]['data'] = json.loads(stdout)
+            resp = external_sender_query(host, port, 'state-entity-query')
+            # try to parse responses
+            responses[name] = json.loads(resp)
         except Exception as err:
             e = ObservabilityResponseError(
                 "Failed to deserialize observability response from {}:\n{!r}"
-                .format(stdout))
+                .format(d['stdout']))
             logging.error(e)
             raise
     return responses
@@ -178,7 +191,7 @@ class ObservabilityNotifier(StoppableThread):
             self.tests = [tests]
         self.tests = [(t, get_func_name(t)) for t in self.tests]
         self.query_func = query_func
-        self.query_query_args = query_args
+        self.query_args = query_args
         self.query_func_name = get_func_name(query_func)
         self.period = period
 

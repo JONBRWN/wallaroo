@@ -43,7 +43,7 @@ from integration import (add_runner,
 
 from collections import Counter
 from functools import partial
-from itertools import cycle
+from itertools import chain, cycle
 import json
 import logging
 import os
@@ -52,8 +52,6 @@ from string import lowercase
 from struct import calcsize, pack, unpack
 import tempfile
 import time
-
-from pytest_pause import pause_for_user
 
 
 class AutoscaleTestError(Exception):
@@ -285,27 +283,52 @@ def test_cluster_is_not_processing(status):
     assert(status['processing_messages'] is False)
 
 
-def test_migrated_partitions(pre_partitions, workers, partitions):
+def test_migration(pre_partitions, post_partitions, workers):
     """
-    Test that post-migration partition data matches up to expected data based
-    on pre-migration partition data.
+    - Test that no "joining" workers are present in the pre set
+    - Test that no "leaving" workers are present in the post set
+    - Test that state partitions moved between the pre_partitiosn map and
+      the post_partitions map.
+    - Test that all of the states present in the `pre` set are also present
+      in the `post` set. New state are allowed in the `post` because of
+      dynamic partitioning (new partitions may be created in real time).
     """
-    # invert the partitions dicts
-    i_pre = inverted(pre_partitions)
-    i_post = inverted(partitions)
-    keys = ['state_partitions']
-    # make sure that none of the joining workers are in the pre-partitions
-    for joining in workers.get('joining', {}):
-        for ptype in keys:
-            for step in partitions[ptype]:
-                for pid in partitions[ptype][step][joining]:
-                    assert(i_pre[ptype][step][pid] != joining)
-    # make sure that none of the leaving workers are in the post-partitions
-    for leaving in workers.get('leaving', {}):
-        for ptype in keys:
-            for step in pre_partitions[ptype]:
-                for pid in pre_partitions[ptype][step][leaving]:
-                    assert(i_post[ptype][step][pid] != leaving)
+    # prepare some useful sets for set-wise comparison
+    pre_parts = {step: set(pre_partitions[step].keys()) for step in
+                 pre_partitions}
+    post_parts = {step: set(post_partitions[step].keys()) for step in
+                  post_partitions}
+    pre_workers = set(chain(*[pre_partitions[step].values() for step in
+                             pre_partitions]))
+    post_workers = set(chain(*[post_partitions[step].values() for step in
+                               post_partitions]))
+    joining = set(workers.get('joining', []))
+    leaving = set(workers.get('leaving', []))
+
+    print('pre', pre_workers)
+    print('post', post_workers)
+    print('joining', joining)
+    print('leaving', leaving)
+    # test no joining workers are present in pre set
+    assert((pre_workers - joining) == pre_workers)
+
+    # test no leaving workers are present in post set
+    assert((post_workers - leaving) == post_workers)
+
+    # test that no parts go missing after migration
+    for step in pre_parts:
+        assert(step in post_parts)
+        assert(post_parts[step] <= pre_parts[step])
+
+    # test that state parts moved between pre and post (by step)
+    for step in pre_partitions:
+        assert(step in post_partitions)
+        try:
+            assert(pre_partitions[step] != post_partitions[step])
+        except Exception as err:
+            print('arrrrgh')
+            print(step)
+            raise err
 
 
 # Autoscale tests runner functions
@@ -495,28 +518,17 @@ def _autoscale_sequence(command, ops=[], cycles=1, initial=None):
                         if obs.error:
                             raise obs.error
 
-                        # Test: all workers have partitions, partitions ids
-                        # for new workers have been migrated from pre-join
-                        # workers
-                        # create list of joining workers
-                        diff_names = {'joining': [r.name for r in joined]}
-                        # Create partial function of the test with the
-                        # data baked in
-                        tmp = partial(test_migrated_partitions, pre_partitions, diff_names)
-                        # Start the test notifier
+                        # Test: at least some states moved, and no states from
+                        #       pre are missing from the post
 
-                        # TODO:  NISAN CONTINUE FROM HERE!
-                        # 1. replace query with "multi_states_query" as above in :471
-                        # 2. replace verification with:
-                        #      - "at least some states moved",
-                        #      - "no states from pre are missing from post" (can still have new)
-                        obs = ObservabilityNotifier(query_func_partitions,
-                            [test_all_workers_have_partitions,
-                             tmp])
-                        obs.start()
-                        obs.join()
-                        if obs.error:
-                            raise obs.error
+                        # get partition data before autoscale operation begins
+                        addresses = [(r.name, r.external) for r in runners
+                                     if r.is_alive()]
+                        responses = multi_states_query(addresses)
+                        post_partitions = joined_partition_query_data(responses)
+                        test_migration(pre_partitions, post_partitions,
+                                       workers={'joining': [r.name for r
+                                                            in joined]})
 
                     elif joiners < 0:  # autoscale: shrink
                         # choose the most recent, still-alive runners to leave
